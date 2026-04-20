@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Auto Speed + Cinema Mode
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Auto-set playback speed and cinema mode on YouTube. Shift+S for settings window.
 // @author       ajsprojects
 // @match        https://www.youtube.com/*
@@ -26,164 +26,143 @@
     let lastVideo = null;
     let currentVideoId = null;
     let settingsAppliedForCurrentVideo = false;
+    let cinemaModeApplied = false;
 
-    function log(msg) {
-        if (config.debug) console.log('[Youtube AutoSpeed]', msg);
+    function log(msg, ...args) {
+        if (config.debug) console.log('[Youtube AutoSpeed]', msg, ...args);
     }
 
     log('Script initialized');
     log('Config:', config);
 
     function getVideoId() {
-        const urlParams = new URLSearchParams(window.location.search);
-        const id = urlParams.get('v');
-        return id;
+        return new URLSearchParams(window.location.search).get('v');
     }
 
     function isTheaterMode() {
-        const hasAttr = document.documentElement.hasAttribute('theater-mode');
-        const hasElement = document.querySelector('ytd-watch-flexy[theater]') !== null;
-        const flexyTheater = document.querySelector('ytd-watch-flexy')?.hasAttribute('theater');
-
-        const result = hasAttr || hasElement || flexyTheater;
-        return result;
+        return (
+            document.documentElement.hasAttribute('theater-mode') ||
+            document.querySelector('ytd-watch-flexy[theater]') !== null ||
+            !!document.querySelector('ytd-watch-flexy')?.hasAttribute('theater')
+        );
     }
 
     function isMusicVideo() {
         try {
-            const playerData = window.ytplayer?.config?.args?.player_response ? JSON.parse(window.ytplayer.config.args.player_response) : null;
-            if (playerData?.videoDetails?.category === 'Music') {
-                log('Music video detected via player data category');
-                return true;
+            const playerResponse = window.ytplayer?.config?.args?.player_response;
+            if (playerResponse) {
+                const data = JSON.parse(playerResponse);
+                if (data?.videoDetails?.category === 'Music') return true;
             }
-        } catch (e) {
+        } catch (e) {}
+
+        const channelName = (
+            document.querySelector('#channel-name a, ytd-channel-name a')?.innerText || ''
+        ).toLowerCase();
+        if (channelName.includes(' - topic') || channelName.includes('music')) return true;
+
+        const hasMusicSection = [...document.querySelectorAll(
+            'ytd-metadata-row-container-renderer, ytd-info-section-renderer'
+        )].some(el => el.innerText.toLowerCase().includes('music in this video'));
+        if (hasMusicSection) return true;
+
+        for (const el of document.querySelectorAll('span.yt-core-attributed-string, yt-formatted-string#title')) {
+            if (el.innerText.trim().toLowerCase() === 'music') return true;
         }
 
-        const channelName = document.querySelector('#channel-name a, ytd-channel-name a')?.innerText || '';
-        const name = channelName.toLowerCase();
-
-        if (name.includes(' - topic') || name.includes('music')) {
-            log(`Music video detected via channel name: ${channelName}`);
-            return true;
-        }
-
-        const hasMusicSection = [...document.querySelectorAll('ytd-metadata-row-container-renderer, ytd-info-section-renderer')]
-            .some(el => el.innerText.toLowerCase().includes('music in this video'));
-        if (hasMusicSection) {
-            log('Music video detected via music section');
-            return true;
-        }
-
-        const musicHeaders = document.querySelectorAll('span.yt-core-attributed-string, yt-formatted-string#title');
-        for (const header of musicHeaders) {
-            if (header.innerText.trim().toLowerCase() === 'music') {
-                log('Music video detected via music header');
-                return true;
-            }
-        }
-
-        if (location.hostname.includes('music.youtube.com')) {
-            log('Music video detected via music.youtube.com domain');
-            return true;
-        }
-
-        log('Not a music video');
         return false;
     }
 
     function applyCinemaMode() {
-        log('applyCinemaMode() called');
-
-        if (!config.cinemaMode) {
-            log('Cinema mode disabled in config');
-            return false;
-        }
-
-        if (!config.enabled) {
-            log('Script disabled in config');
-            return false;
-        }
-
+        if (!config.cinemaMode || !config.enabled) return false;
         if (isTheaterMode()) {
-            log('Already in cinema mode');
+            log('Already in theater mode');
+            cinemaModeApplied = true;
             return true;
         }
 
-        const video = document.querySelector('video');
-        if (!video) {
-            log('No video element found');
-            return false;
+        const theaterBtn = document.querySelector('.ytp-size-button');
+        if (theaterBtn) {
+            log('Clicking theater button');
+            theaterBtn.click();
+            setTimeout(() => {
+                cinemaModeApplied = isTheaterMode();
+                log('Theater mode after click:', cinemaModeApplied);
+            }, 300);
+            return true;
         }
 
-        log('Dispatching "t" key event for cinema mode');
-        const keyEvent = new KeyboardEvent('keydown', {
-            key: 't',
-            code: 'KeyT',
-            keyCode: 84,
-            which: 84,
-            bubbles: true,
-            cancelable: true
-        });
+        log('Theater button not found');
+        return false;
+    }
 
-        document.dispatchEvent(keyEvent);
-        log('Cinema mode "t" key event dispatched');
-
-        setTimeout(() => {
-            log(`Cinema mode status after key press: ${isTheaterMode()}`);
-        }, 200);
-
-        return true;
+    function applySpeed(video) {
+        const music = config.skipMusic && isMusicVideo();
+        const targetSpeed = music ? 1 : config.speed;
+        if (video.playbackRate !== targetSpeed) {
+            video.playbackRate = targetSpeed;
+            log('Speed set to ' + targetSpeed + 'x' + (music ? ' (music)' : ''));
+        }
     }
 
     function applySettings() {
-        if (!config.enabled) {
-            log('Script disabled, skipping applySettings');
-            return;
-        }
+        if (!config.enabled) return;
 
         const video = document.querySelector('video');
-        if (!video) {
-            return;
-        }
+        if (!video) return;
 
         const videoId = getVideoId();
 
-        if (videoId !== currentVideoId) {
-            log(`New video detected: ${currentVideoId} -> ${videoId}`);
+        if (videoId !== currentVideoId || video !== lastVideo) {
+            log('New video detected, resetting flags');
             currentVideoId = videoId;
-            lastVideo = null;
-            settingsAppliedForCurrentVideo = false;
-        }
-
-        if (video !== lastVideo) {
-            log('New video element detected, applying settings');
             lastVideo = video;
             settingsAppliedForCurrentVideo = false;
+            cinemaModeApplied = false;
         }
 
-        if (settingsAppliedForCurrentVideo) {
-            return;
+        if (!settingsAppliedForCurrentVideo) {
+            log('Applying settings for video:', videoId);
+            settingsAppliedForCurrentVideo = true;
+            applySpeed(video);
         }
 
-        log('Applying settings for current video');
-        settingsAppliedForCurrentVideo = true;
-
-        const music = config.skipMusic && isMusicVideo();
-        const targetSpeed = music ? 1 : config.speed;
-
-        video.playbackRate = targetSpeed;
-        log(`Playback speed set to ${targetSpeed}x ${music ? '(music video)' : ''}`);
-
-        if (config.cinemaMode) {
+        if (config.cinemaMode && !cinemaModeApplied) {
             setTimeout(() => {
                 if (!isTheaterMode()) {
-                    log('Attempting cinema mode');
                     applyCinemaMode();
                 } else {
-                    log('Already in cinema mode');
+                    cinemaModeApplied = true;
                 }
-            }, 500);
+            }, 600);
         }
+    }
+
+    function watchSpeed() {
+        setInterval(() => {
+            if (!config.enabled) return;
+            const video = document.querySelector('video');
+            if (!video) return;
+            const music = config.skipMusic && isMusicVideo();
+            const target = music ? 1 : config.speed;
+            if (Math.abs(video.playbackRate - target) > 0.01) {
+                log('Speed drift detected (' + video.playbackRate + '), correcting to ' + target);
+                video.playbackRate = target;
+            }
+        }, 2000);
+    }
+
+    function makeCheckboxLabel(text, checked, extraStyle) {
+        const label = document.createElement('label');
+        label.style.cssText = 'display: block; margin-bottom: 8px;' + (extraStyle || '');
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checked;
+
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + text));
+        return { label, cb };
     }
 
     function createGUI() {
@@ -206,86 +185,97 @@
             display: none;
         `;
 
-        settingsPanel.innerHTML = `
-            <label style="display: block; margin-bottom: 8px; font-weight: bold;">
-                <input type="checkbox" id="yt-enabled-toggle" ${config.enabled ? 'checked' : ''}>
-                Enable Script
-            </label>
-            <hr style="border: 0.5px solid #444; margin: 8px 0;">
-            <label style="display: block; margin-bottom: 8px;">
-                <input type="checkbox" id="yt-cinema-toggle" ${config.cinemaMode ? 'checked' : ''}>
-                Auto Cinema Mode
-            </label>
-            <label style="display: block; margin-bottom: 8px;">
-                <input type="checkbox" id="yt-skip-music-toggle" ${config.skipMusic ? 'checked' : ''}>
-                Auto-disable for Music Videos
-            </label>
-            <label style="display: block;">Speed: <span id="yt-speed-value">${config.speed}x</span></label>
-            <input type="range" id="yt-speed-slider" min="0.25" max="2" step="0.05" value="${config.speed}" style="width: 100%;">
-            <div style="margin-top: 10px; font-size: 12px; opacity: 0.6;">🔁 Shift + S to toggle this panel</div>
-        `;
+        const { label: enableLabel, cb: enableCb } = makeCheckboxLabel('Enable Script', config.enabled, 'font-weight: bold;');
+        enableCb.id = 'yt-enabled-toggle';
+        settingsPanel.appendChild(enableLabel);
+
+        const hr = document.createElement('hr');
+        hr.style.cssText = 'border: 0.5px solid #444; margin: 8px 0;';
+        settingsPanel.appendChild(hr);
+
+        const { label: cinemaLabel, cb: cinemaCb } = makeCheckboxLabel('Auto Cinema Mode', config.cinemaMode);
+        cinemaCb.id = 'yt-cinema-toggle';
+        settingsPanel.appendChild(cinemaLabel);
+
+        const { label: musicLabel, cb: musicCb } = makeCheckboxLabel('Auto-disable for Music Videos', config.skipMusic);
+        musicCb.id = 'yt-skip-music-toggle';
+        settingsPanel.appendChild(musicLabel);
+
+        const speedLabelEl = document.createElement('label');
+        speedLabelEl.style.cssText = 'display: block;';
+        speedLabelEl.appendChild(document.createTextNode('Speed: '));
+        const speedValueSpan = document.createElement('span');
+        speedValueSpan.id = 'yt-speed-value';
+        speedValueSpan.textContent = config.speed + 'x';
+        speedLabelEl.appendChild(speedValueSpan);
+        settingsPanel.appendChild(speedLabelEl);
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.id = 'yt-speed-slider';
+        slider.min = '0.25';
+        slider.max = '2';
+        slider.step = '0.05';
+        slider.value = String(config.speed);
+        slider.style.width = '100%';
+        settingsPanel.appendChild(slider);
+
+        const hint = document.createElement('div');
+        hint.style.cssText = 'margin-top: 10px; font-size: 12px; opacity: 0.6;';
+        hint.textContent = '\uD83D\uDD01 Shift + S to toggle this panel';
+        settingsPanel.appendChild(hint);
 
         document.body.appendChild(settingsPanel);
         log('GUI created and added to DOM');
 
         function updateControlsState() {
             const disabled = !config.enabled;
-            const elements = [
-                document.getElementById('yt-cinema-toggle'),
-                document.getElementById('yt-skip-music-toggle'),
-                document.getElementById('yt-speed-slider')
-            ];
-            elements.forEach(el => {
-                if (el) {
-                    el.disabled = disabled;
-                    el.parentElement.style.opacity = disabled ? 0.5 : 1;
-                }
+            [cinemaCb, musicCb, slider].forEach(el => {
+                el.disabled = disabled;
+                el.parentElement.style.opacity = disabled ? '0.5' : '1';
             });
         }
-
         updateControlsState();
 
-        document.getElementById('yt-enabled-toggle').addEventListener('change', function () {
+        enableCb.addEventListener('change', function () {
             config.enabled = this.checked;
             GM_setValue('enabled', config.enabled);
-            log(`Script enabled: ${config.enabled}`);
-
+            log('Script enabled: ' + config.enabled);
             const video = document.querySelector('video');
             if (config.enabled) {
                 lastVideo = null;
                 settingsAppliedForCurrentVideo = false;
+                cinemaModeApplied = false;
                 applySettings();
             } else if (video) {
                 video.playbackRate = 1;
-                log('Playback speed reset to 1x (script disabled)');
+                log('Playback speed reset to 1x');
             }
             updateControlsState();
         });
 
-        document.getElementById('yt-cinema-toggle').addEventListener('change', function () {
+        cinemaCb.addEventListener('change', function () {
             config.cinemaMode = this.checked;
             GM_setValue('cinemaMode', config.cinemaMode);
-            log(`Cinema mode setting: ${config.cinemaMode}`);
-            settingsAppliedForCurrentVideo = false;
+            log('Cinema mode: ' + config.cinemaMode);
+            cinemaModeApplied = false;
             applySettings();
         });
 
-        document.getElementById('yt-skip-music-toggle').addEventListener('change', function () {
+        musicCb.addEventListener('change', function () {
             config.skipMusic = this.checked;
             GM_setValue('skipMusic', config.skipMusic);
-            log(`Auto-disable for music videos ${config.skipMusic ? 'enabled' : 'disabled'}`);
+            log('Skip music: ' + config.skipMusic);
             settingsAppliedForCurrentVideo = false;
             applySettings();
         });
 
-        document.getElementById('yt-speed-slider').addEventListener('input', function () {
+        slider.addEventListener('input', function () {
             const val = parseFloat(this.value);
             config.speed = val;
             GM_setValue('speed', val);
-            document.getElementById('yt-speed-value').textContent = val.toFixed(2) + 'x';
-            log(`Speed changed to ${val}x`);
-
-            // Immediately apply new speed to current video
+            speedValueSpan.textContent = val.toFixed(2) + 'x';
+            log('Speed changed to ' + val + 'x');
             const video = document.querySelector('video');
             if (video && config.enabled) {
                 const music = config.skipMusic && isMusicVideo();
@@ -293,45 +283,54 @@
             }
         });
 
-        document.addEventListener('keydown', function (e) {
+        // Shift+S
+        window.addEventListener('keydown', function (e) {
+            const tag = document.activeElement?.tagName;
+            const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable;
+            if (isTyping) return;
+
             if (e.shiftKey && e.key.toLowerCase() === 's') {
-                settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
-                log(`Settings panel ${settingsPanel.style.display === 'none' ? 'hidden' : 'shown'}`);
+                e.stopPropagation();
+                const visible = settingsPanel.style.display !== 'none';
+                settingsPanel.style.display = visible ? 'none' : 'block';
+                log('Settings panel ' + (visible ? 'hidden' : 'shown'));
             }
-        });
+        }, true);
     }
 
-    function setupSPANavigation() {
-        log('Setting up SPA navigation detection');
-
+    function setupNavigation() {
         let lastUrl = location.href;
+
         setInterval(() => {
             if (location.href !== lastUrl) {
-                log(`URL changed: ${lastUrl} -> ${location.href}`);
+                log('URL changed: ' + lastUrl + ' -> ' + location.href);
                 lastUrl = location.href;
                 lastVideo = null;
                 settingsAppliedForCurrentVideo = false;
+                cinemaModeApplied = false;
                 currentVideoId = null;
-                applySettings();
+                setTimeout(applySettings, 800);
             }
         }, 500);
 
         document.addEventListener('yt-navigate-finish', () => {
-            log('YouTube navigation event detected');
+            log('yt-navigate-finish fired');
             lastVideo = null;
             settingsAppliedForCurrentVideo = false;
+            cinemaModeApplied = false;
             currentVideoId = null;
-            applySettings();
+            setTimeout(applySettings, 800);
         });
     }
 
-    // Watch for new video elements being added
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
-                if (node.tagName === 'VIDEO') {
+                if (node.nodeName === 'VIDEO') {
                     log('Video element added to DOM');
-                    applySettings();
+                    lastVideo = null;
+                    settingsAppliedForCurrentVideo = false;
+                    setTimeout(applySettings, 300);
                     return;
                 }
             }
@@ -339,15 +338,11 @@
     });
 
     function startObserver() {
-        const playerContainer = document.querySelector('#movie_player, .html5-video-player, #player-container');
-        if (playerContainer) {
-            observer.observe(playerContainer, {
-                childList: true,
-                subtree: true
-            });
-            log('MutationObserver started - watching for new video elements only');
+        const container = document.querySelector('#movie_player, .html5-video-player, #player-container');
+        if (container) {
+            observer.observe(container, { childList: true, subtree: true });
+            log('MutationObserver started');
         } else {
-            log('Player container not found, retrying in 500ms');
             setTimeout(startObserver, 500);
         }
     }
@@ -356,8 +351,9 @@
         log('Initializing script');
         createGUI();
         applySettings();
-        setupSPANavigation();
+        setupNavigation();
         startObserver();
+        watchSpeed();
         log('Initialization complete');
     }
 
@@ -370,7 +366,8 @@
     }
 
     window.addEventListener('load', () => {
-        log('Window load event fired, applying settings after 1s delay');
+        log('Window load event, applying settings after 1s');
         setTimeout(applySettings, 1000);
     });
+
 })();
